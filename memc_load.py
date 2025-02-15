@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# brew install protobuf
-# protoc  --python_out=. ./appsinstalled.proto
-# pip install protobuf
-# pip install python-memcached
-
 import collections
 import glob
 import gzip
@@ -41,8 +35,6 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     key = "{}:{}".format(appsinstalled.dev_type, appsinstalled.dev_id)
     ua.apps.extend(appsinstalled.apps)
     packed = ua.SerializeToString()
-    # @TODO persistent connection
-    # @TODO retry and timeouts!
     try:
         if dry_run:
             logging.debug(
