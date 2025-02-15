@@ -1,28 +1,31 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
 # pip install protobuf
 # pip install python-memcached
 
-import os
-import gzip
-import sys
-import glob
-import logging
 import collections
-from optparse import OptionParser
-import appsinstalled_pb2
-import memcache
+import glob
+import gzip
+import logging
+import os
+import sys
 import threading
+from optparse import OptionParser
 from queue import Queue
+
+import memcache
+
+import appsinstalled_pb2
 
 MEMC_TIMEOUT = 1
 MEMC_RETRIES = 3
 WORKERS = 10
 
 NORMAL_ERR_RATE = 0.01
-AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
+AppsInstalled = collections.namedtuple(
+    "AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"]
+)
 
 
 def dot_rename(path):
@@ -30,20 +33,25 @@ def dot_rename(path):
     # atomic in most cases
     os.rename(path, os.path.join(head, "." + fn))
 
+
 def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     ua = appsinstalled_pb2.UserApps()
     ua.lat = appsinstalled.lat
     ua.lon = appsinstalled.lon
-    key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
+    key = "{}:{}".format(appsinstalled.dev_type, appsinstalled.dev_id)
     ua.apps.extend(appsinstalled.apps)
     packed = ua.SerializeToString()
     # @TODO persistent connection
     # @TODO retry and timeouts!
     try:
         if dry_run:
-            logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
+            logging.debug(
+                "{} - {} -> {}".format(memc_addr, key, str(ua).replace("\n", " "))
+            )
         else:
-            memc = memcache.Client([memc_addr], socket_timeout=MEMC_TIMEOUT, dead_retry=MEMC_RETRIES)
+            memc = memcache.Client(
+                [memc_addr], socket_timeout=MEMC_TIMEOUT, dead_retry=MEMC_RETRIES
+            )
             result = memc.set(key, packed)
             if result:
                 return True
@@ -51,7 +59,7 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
                 logging.error(f"Cannot write to memc {memc_addr}: connection error")
                 return False
     except Exception as e:
-        logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
+        logging.exception("Cannot write to memc {}: {}".format(memc_addr, e))
         return False
     return True
 
@@ -74,6 +82,7 @@ def parse_appsinstalled(line):
         logging.info("Invalid geo coords: `%s`" % line)
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
+
 def worker(device_memc, options, queue, counters):
     while not queue.empty():
         if queue.empty():
@@ -85,13 +94,13 @@ def worker(device_memc, options, queue, counters):
         if not appsinstalled:
             counters["errors"] += 1
             return None
-        
+
         memc_addr = device_memc.get(appsinstalled.dev_type)
         if not memc_addr:
             counters["errors"] += 1
             logging.error("Unknow device type: %s" % appsinstalled.dev_type)
             return None
-        
+
         ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
 
         if ok:
@@ -110,17 +119,25 @@ def main(options):
     for fn in glob.iglob(options.pattern):
         queue = Queue()
         counters = {"processed": 0, "errors": 0}
-        logging.info('Processing %s' % fn)
-        fd = gzip.open(fn, 'rt')
+        logging.info("Processing %s" % fn)
+        fd = gzip.open(fn, "rt")
         for line in fd:
             line = line.strip()
             if not line:
                 continue
             queue.put(line)
-        
+
         threads = []
         for _ in range(WORKERS):
-            thread = threading.Thread(target=worker, args=(device_memc, options, queue, counters,))
+            thread = threading.Thread(
+                target=worker,
+                args=(
+                    device_memc,
+                    options,
+                    queue,
+                    counters,
+                ),
+            )
             thread.start()
             threads.append(thread)
 
@@ -136,7 +153,11 @@ def main(options):
         if err_rate < NORMAL_ERR_RATE:
             logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
         else:
-            logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
+            logging.error(
+                "High error rate ({} > {}). Failed load".format(
+                    err_rate, NORMAL_ERR_RATE
+                )
+            )
         fd.close()
         dot_rename(fn)
 
@@ -157,7 +178,7 @@ def prototest():
         assert ua == unpacked
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     op = OptionParser()
     op.add_option("-t", "--test", action="store_true", default=False)
     op.add_option("-l", "--log", action="store", default=None)
@@ -168,8 +189,12 @@ if __name__ == '__main__':
     op.add_option("--adid", action="store", default="127.0.0.1:33015")
     op.add_option("--dvid", action="store", default="127.0.0.1:33016")
     (opts, args) = op.parse_args()
-    logging.basicConfig(filename=opts.log, level=logging.INFO if not opts.dry else logging.DEBUG,
-                        format='[%(asctime)s] %(levelname).1s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
+    logging.basicConfig(
+        filename=opts.log,
+        level=logging.INFO if not opts.dry else logging.DEBUG,
+        format="[%(asctime)s] %(levelname).1s %(message)s",
+        datefmt="%Y.%m.%d %H:%M:%S",
+    )
     if opts.test:
         prototest()
         sys.exit(0)
