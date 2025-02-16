@@ -1,0 +1,23 @@
+name: otus-memcached-loader
+on:
+  push:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: install dependencies
+        run: pip install -r requirements.txt
+      - name: run linter
+        run: ruff check
+      - name: run formatter
+        run: black .
+      - name: check import sorting
+        run: isort .
+      - name: run tests
+        run: python memc_load.py --test
