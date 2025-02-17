@@ -2,24 +2,30 @@ import collections
 import glob
 import gzip
 import logging
+import multiprocessing
 import os
 import sys
-import threading
 from optparse import OptionParser
-from queue import Queue
 
 import memcache
 
 import appsinstalled_pb2
 
 MEMC_TIMEOUT = 1
-MEMC_RETRIES = 3
-WORKERS = 10
 
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple(
     "AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"]
 )
+
+
+def _configure_logging(options):
+    logging.basicConfig(
+        filename=options.log,
+        level=logging.INFO if not options.dry else logging.DEBUG,
+        format="[%(asctime)s] %(levelname).1s %(message)s",
+        datefmt="%Y.%m.%d %H:%M:%S",
+    )
 
 
 def dot_rename(path):
@@ -41,9 +47,7 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
                 "{} - {} -> {}".format(memc_addr, key, str(ua).replace("\n", " "))
             )
         else:
-            memc = memcache.Client(
-                [memc_addr], socket_timeout=MEMC_TIMEOUT, dead_retry=MEMC_RETRIES
-            )
+            memc = memcache.Client([memc_addr], socket_timeout=MEMC_TIMEOUT)
             result = memc.set(key, packed)
             if result:
                 return True
@@ -75,30 +79,47 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def worker(device_memc, options, queue, counters):
-    while not queue.empty():
-        if queue.empty():
-            break
+def worker(device_memc, options, fn):
+    _configure_logging(options)
 
-        line = queue.get()
+    processed = errors = 0
+    fd = gzip.open(fn, "rt")
+    for line in fd:
+        if not line:
+            continue
+
         appsinstalled = parse_appsinstalled(line)
 
         if not appsinstalled:
-            counters["errors"] += 1
+            errors += 1
             return None
 
         memc_addr = device_memc.get(appsinstalled.dev_type)
         if not memc_addr:
-            counters["errors"] += 1
+            errors += 1
             logging.error("Unknow device type: %s" % appsinstalled.dev_type)
             return None
 
         ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
 
         if ok:
-            counters["processed"] += 1
+            processed += 1
         else:
-            counters["errors"] += 1
+            errors += 1
+
+    if not processed:
+        fd.close()
+        dot_rename(fn)
+
+    err_rate = float(errors) / processed
+    if err_rate < NORMAL_ERR_RATE:
+        logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
+    else:
+        logging.error(
+            "High error rate ({} > {}). Failed load".format(err_rate, NORMAL_ERR_RATE)
+        )
+    fd.close()
+    dot_rename(fn)
 
 
 def main(options):
@@ -108,50 +129,24 @@ def main(options):
         "adid": options.adid,
         "dvid": options.dvid,
     }
+
+    pool = []
+
     for fn in glob.iglob(options.pattern):
-        queue = Queue()
-        counters = {"processed": 0, "errors": 0}
         logging.info("Processing %s" % fn)
-        fd = gzip.open(fn, "rt")
-        for line in fd:
-            line = line.strip()
-            if not line:
-                continue
-            queue.put(line)
+        process = multiprocessing.Process(
+            target=worker,
+            args=(
+                device_memc,
+                options,
+                fn,
+            ),
+        )
+        process.start()
+        pool.append(process)
 
-        threads = []
-        for _ in range(WORKERS):
-            thread = threading.Thread(
-                target=worker,
-                args=(
-                    device_memc,
-                    options,
-                    queue,
-                    counters,
-                ),
-            )
-            thread.start()
-            threads.append(thread)
-
-        for thread in threads:
-            thread.join()
-
-        if not counters["processed"]:
-            fd.close()
-            dot_rename(fn)
-            continue
-
-        err_rate = float(counters["errors"]) / counters["processed"]
-        if err_rate < NORMAL_ERR_RATE:
-            logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
-        else:
-            logging.error(
-                "High error rate ({} > {}). Failed load".format(
-                    err_rate, NORMAL_ERR_RATE
-                )
-            )
-        fd.close()
-        dot_rename(fn)
+    for process in pool:
+        process.join()
 
 
 def prototest():
@@ -181,12 +176,7 @@ if __name__ == "__main__":
     op.add_option("--adid", action="store", default="127.0.0.1:33015")
     op.add_option("--dvid", action="store", default="127.0.0.1:33016")
     (opts, args) = op.parse_args()
-    logging.basicConfig(
-        filename=opts.log,
-        level=logging.INFO if not opts.dry else logging.DEBUG,
-        format="[%(asctime)s] %(levelname).1s %(message)s",
-        datefmt="%Y.%m.%d %H:%M:%S",
-    )
+    _configure_logging(opts)
     if opts.test:
         prototest()
         sys.exit(0)
