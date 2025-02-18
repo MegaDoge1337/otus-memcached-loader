@@ -11,7 +11,9 @@ import memcache
 
 import appsinstalled_pb2
 
-MEMC_TIMEOUT = 1
+MEMC_BATCHES = 10
+MEMC_SOCKET_TIMEOUT = 60
+MEMC_BATCHES_TIMEOUT = 60
 
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple(
@@ -34,28 +36,17 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
-    ua = appsinstalled_pb2.UserApps()
-    ua.lat = appsinstalled.lat
-    ua.lon = appsinstalled.lon
-    key = "{}:{}".format(appsinstalled.dev_type, appsinstalled.dev_id)
-    ua.apps.extend(appsinstalled.apps)
-    packed = ua.SerializeToString()
+def insert_appsinstalled(memc_conn: memcache.Client, batch, dry_run=False):
     try:
         if dry_run:
-            logging.debug(
-                "{} - {} -> {}".format(memc_addr, key, str(ua).replace("\n", " "))
-            )
+            logging.debug("{} -> {}".format(memc_conn.servers[0].address, batch))
         else:
-            memc = memcache.Client([memc_addr], socket_timeout=MEMC_TIMEOUT)
-            result = memc.set(key, packed)
-            if result:
-                return True
-            else:
-                logging.error(f"Cannot write to memc {memc_addr}: connection error")
-                return False
+            failed_count = memc_conn.set_multi(batch, time=MEMC_BATCHES_TIMEOUT)
+            return len(failed_count)
     except Exception as e:
-        logging.exception("Cannot write to memc {}: {}".format(memc_addr, e))
+        logging.exception(
+            "Cannot write to memc {}: {}".format(memc_conn.servers[0].address, e)
+        )
         return False
     return True
 
@@ -79,11 +70,21 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def worker(device_memc, options, fn):
+def worker(options, fn):
+    device_memc = {
+        "idfa": memcache.Client([options.idfa], socket_timeout=MEMC_SOCKET_TIMEOUT),
+        "gaid": memcache.Client([options.gaid], socket_timeout=MEMC_SOCKET_TIMEOUT),
+        "adid": memcache.Client([options.adid], socket_timeout=MEMC_SOCKET_TIMEOUT),
+        "dvid": memcache.Client([options.dvid], socket_timeout=MEMC_SOCKET_TIMEOUT),
+    }
+
+    batches = {"idfa": {}, "gaid": {}, "adid": {}, "dvid": {}}
+
     _configure_logging(options)
 
     processed = errors = 0
     fd = gzip.open(fn, "rt")
+
     for line in fd:
         if not line:
             continue
@@ -94,18 +95,37 @@ def worker(device_memc, options, fn):
             errors += 1
             return None
 
-        memc_addr = device_memc.get(appsinstalled.dev_type)
-        if not memc_addr:
+        memc_conn = device_memc.get(appsinstalled.dev_type)
+        if not memc_conn:
             errors += 1
             logging.error("Unknow device type: %s" % appsinstalled.dev_type)
             return None
 
-        ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
+        dev_type = appsinstalled.dev_type
 
-        if ok:
-            processed += 1
+        if len(batches[dev_type]) >= MEMC_BATCHES:
+            failed_count = insert_appsinstalled(
+                memc_conn, batches[dev_type], options.dry
+            )
+            processed += len(batches[dev_type]) - failed_count
+            errors += failed_count
+            batches[dev_type] = {}
         else:
-            errors += 1
+            ua = appsinstalled_pb2.UserApps()
+            ua.lat = appsinstalled.lat
+            ua.lon = appsinstalled.lon
+            key = "{}:{}".format(appsinstalled.dev_type, appsinstalled.dev_id)
+            ua.apps.extend(appsinstalled.apps)
+            packed = ua.SerializeToString()
+            batches[dev_type][key] = packed
+
+    for dev_type, batch in batches.items():
+        if not batch:
+            continue
+        memc_conn = device_memc.get(dev_type)
+        failed_count = insert_appsinstalled(memc_conn, batch, options.dry)
+        processed += len(batch) - failed_count
+        errors += failed_count
 
     if not processed:
         fd.close()
@@ -123,13 +143,6 @@ def worker(device_memc, options, fn):
 
 
 def main(options):
-    device_memc = {
-        "idfa": options.idfa,
-        "gaid": options.gaid,
-        "adid": options.adid,
-        "dvid": options.dvid,
-    }
-
     pool = []
 
     for fn in glob.iglob(options.pattern):
@@ -137,7 +150,6 @@ def main(options):
         process = multiprocessing.Process(
             target=worker,
             args=(
-                device_memc,
                 options,
                 fn,
             ),
@@ -183,7 +195,12 @@ if __name__ == "__main__":
 
     logging.info("Memc loader started with options: %s" % opts)
     try:
+        import time
+
+        start = time.time()
         main(opts)
+        end = time.time()
+        print(f"--- {end - start}")
     except Exception as e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
