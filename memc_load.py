@@ -195,12 +195,7 @@ if __name__ == "__main__":
 
     logging.info("Memc loader started with options: %s" % opts)
     try:
-        import time
-
-        start = time.time()
         main(opts)
-        end = time.time()
-        print(f"--- {end - start}")
     except Exception as e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
